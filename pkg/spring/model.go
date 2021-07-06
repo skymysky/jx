@@ -11,8 +11,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jenkins-x/jx/pkg/util"
-	"gopkg.in/AlecAivazis/survey.v1"
+	"github.com/jenkins-x/jx-logging/pkg/log"
+	"github.com/pkg/errors"
+
+	"github.com/jenkins-x/jx/v2/pkg/util"
+	"github.com/jenkins-x/jx/v2/pkg/version"
+	survey "gopkg.in/AlecAivazis/survey.v1"
 )
 
 const (
@@ -24,12 +28,13 @@ const (
 	OptionPackaging      = "packaging"
 	OptionDependency     = "dep"
 	OptionDependencyKind = "kind"
+	OptionType           = "type"
 
-	startSpringURL = "http://start.spring.io"
+	startSpringURL = "https://start.spring.io"
 )
 
 var (
-	DefaultDependencyKinds = []string{"Core", "Web", "Template Engines", "SQL", "I/O", "Ops"}
+	DefaultDependencyKinds = []string{"Core", "Web", "Template Engines", "SQL", "I/O", "Ops", "Spring Cloud GCP", "Azure", "Cloud Contract", "Cloud AWS", "Cloud Messaging", "Cloud Tracing"}
 )
 
 type SpringValue struct {
@@ -65,6 +70,7 @@ type SpringBootModel struct {
 	Language     SpringOptions
 	JavaVersion  SpringOptions
 	BootVersion  SpringOptions
+	Type         SpringOptions
 	GroupId      SpringValue
 	ArtifactId   SpringValue
 	Version      SpringValue
@@ -86,6 +92,15 @@ type SpringBootForm struct {
 	PackageName     string
 	Dependencies    []string
 	DependencyKinds []string
+	Type            string
+}
+
+type errorResponse struct {
+	Timestamp string `json:"timestamp,omitempty"`
+	Status    int    `json:"status,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Path      string `json:"path,omitempty"`
 }
 
 func LoadSpringBoot(cacheDir string) (*SpringBootModel, error) {
@@ -96,6 +111,7 @@ func LoadSpringBoot(cacheDir string) (*SpringBootModel, error) {
 			return nil, err
 		}
 		req.Header.Set("Accept", "application/json")
+		addClientHeader(req)
 
 		res, err := client.Do(req)
 		if err != nil {
@@ -117,6 +133,24 @@ func LoadSpringBoot(cacheDir string) (*SpringBootModel, error) {
 	err = json.Unmarshal(body, &model)
 	if err != nil {
 		return nil, err
+	}
+	// default the build tool
+	if model.Type.Default == "" {
+		model.Type.Default = "maven"
+	}
+	if len(model.Type.Values) == 0 {
+		model.Type.Values = []SpringOption{
+			{
+				ID:          "gradle",
+				Name:        "Gradle",
+				Description: "Build with the gradle build tool",
+			},
+			{
+				ID:          "maven",
+				Name:        "Maven",
+				Description: "Build with the maven build tool",
+			},
+		}
 	}
 	return &model, nil
 }
@@ -158,6 +192,9 @@ func (model *SpringBootModel) CreateSurvey(data *SpringBootForm, advanced bool, 
 	}
 	if data.Packaging == "" && advanced {
 		qs = append(qs, CreateValueSelect("Packaging", "packaging", &model.Packaging, data))
+	}
+	if data.Type == "" && advanced {
+		qs = append(qs, CreateValueSelect("Build Tool", "type", &model.Type, data))
 	}
 	if data.GroupId == "" {
 		qs = append(qs, CreateValueInput("Group", "groupId", &model.GroupId, data))
@@ -303,15 +340,32 @@ func (data *SpringBootForm) CreateProject(workDir string) (string, error) {
 		parameters = "?" + parameters
 	}
 	u := "http://start.spring.io/starter.zip" + parameters
-	//fmt.Printf("generating spring project from: %s\n", u)
 	req, err := http.NewRequest(http.MethodGet, u, strings.NewReader(""))
 	if err != nil {
 		return answer, err
 	}
+	addClientHeader(req)
 	res, err := client.Do(req)
 	if err != nil {
 		return answer, err
 	}
+
+	if res.StatusCode == 400 {
+		errorBody, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return answer, err
+		}
+
+		errorResponse := errorResponse{}
+		err = json.Unmarshal(errorBody, &errorResponse)
+		if err != nil {
+			return answer, err
+		}
+
+		log.Logger().Infof("%s", util.ColorError(errorResponse.Message))
+		return answer, errors.New("unable to create spring quickstart")
+	}
+
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		return answer, err
@@ -343,6 +397,7 @@ func (data *SpringBootForm) AddFormValues(form *url.Values) {
 	AddFormValue(form, "artifactId", data.ArtifactId)
 	AddFormValue(form, "version", data.Version)
 	AddFormValue(form, "name", data.Name)
+	AddFormValue(form, "type", data.Type)
 	AddFormValues(form, "dependencies", data.Dependencies)
 }
 
@@ -362,4 +417,9 @@ func AddFormValue(form *url.Values, key string, v string) {
 
 func emptyArray(values []string) bool {
 	return values == nil || len(values) == 0
+}
+
+func addClientHeader(req *http.Request) {
+	userAgent := "jx/" + version.GetVersion()
+	req.Header.Set("User-Agent", userAgent)
 }

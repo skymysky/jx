@@ -1,10 +1,12 @@
 package jenkins
 
 import (
-	"github.com/jenkins-x/jx/pkg/gits"
+	"github.com/jenkins-x/jx/v2/pkg/gits"
+	"k8s.io/apimachinery/pkg/util/uuid"
 )
 
-func CreateFolderXml(folderUrl string, name string) string {
+// CreateFolderXML creates a Jenkins Folder XML
+func CreateFolderXML(folderURL string, name string) string {
 	return `<?xml version='1.0' encoding='UTF-8'?>
 <com.cloudbees.hudson.plugins.folder.Folder plugin="cloudbees-folder@6.2.1">
   <actions>
@@ -44,16 +46,64 @@ func CreateFolderXml(folderUrl string, name string) string {
 `
 }
 
-func createBranchSource(info *gits.GitRepositoryInfo, gitProvider gits.GitProvider, credentials string, branches string) string {
+// CreatePipelineXML creates the XML for a stand alone pipeline that is not using the Multi Branch Project
+func CreatePipelineXML(gitURL string, branch string, jenksinsfileName string) string {
+	return `<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job@2.31">
+  <actions>
+    <org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobAction plugin="pipeline-model-definition@1.3.4.1"/>
+  </actions>
+  <description></description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps@2.63">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git@3.9.1">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>` + gitURL + `</url>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>*/` + branch + `</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+      <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+      <submoduleCfg class="list"/>
+      <extensions/>
+    </scm>
+    <scriptPath>` + jenksinsfileName + `</scriptPath>
+    <lightweight>true</lightweight>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>`
+}
+
+func createBranchSource(info *gits.GitRepository, gitProvider gits.GitProvider, credentials string, branches string) string {
+	idXml := `<id>` + string(uuid.NewUUID()) + `</id>`
 	credXml := ""
 	if credentials != "" {
-		credXml = `		  <credentialsId>` + credentials + `</credentialsId>
+		credXml = `
+		  <credentialsId>` + credentials + `</credentialsId>
 `
 	}
-	if gitProvider.IsGitHub() {
+
+	switch gitProvider.Kind() {
+	case gits.KindGitHub:
+		serverXml := ""
+		ghp, ok := gitProvider.(*gits.GitHubProvider)
+		if ok {
+			u := ghp.GetEnterpriseApiURL()
+			if u != "" {
+				serverXml = `		  <apiUri>` + u + `</apiUri>
+`
+			}
+		}
 		return `
 	    <source class="org.jenkinsci.plugins.github_branch_source.GitHubSCMSource" plugin="github-branch-source@2.3.1">
-		  <id>b50ee5d4-cb45-42de-9140-d79330bab9ac</id>` + credXml + `
+		  ` + idXml + credXml + serverXml + `
 		  <repoOwner>` + info.Organisation + `</repoOwner>
 		  <repository>` + info.Name + `</repository>
 		  <traits>
@@ -61,7 +111,7 @@ func createBranchSource(info *gits.GitRepositoryInfo, gitProvider gits.GitProvid
 			  <strategyId>1</strategyId>
 			</org.jenkinsci.plugins.github__branch__source.BranchDiscoveryTrait>
 			<org.jenkinsci.plugins.github__branch__source.OriginPullRequestDiscoveryTrait>
-			  <strategyId>1</strategyId>
+			  <strategyId>2</strategyId>
 			</org.jenkinsci.plugins.github__branch__source.OriginPullRequestDiscoveryTrait>
 			<org.jenkinsci.plugins.github__branch__source.ForkPullRequestDiscoveryTrait>
 			  <strategyId>1</strategyId>
@@ -73,11 +123,10 @@ func createBranchSource(info *gits.GitRepositoryInfo, gitProvider gits.GitProvid
 		  </traits>
 		</source>
 `
-	}
-	if gitProvider.IsGitea() {
+	case gits.KindGitea:
 		return `
 	    <source class="org.jenkinsci.plugin.gitea.GiteaSCMSource" plugin="gitea@1.0.5">
-          <id>db44ccb9-31c0-4b78-8989-614af3a87b9f</id>` + credXml + `
+          ` + idXml + credXml + `
           <serverUrl>` + info.HostURLWithoutUser() + `</serverUrl>
           <repoOwner>` + info.Organisation + `</repoOwner>
 		  <repository>` + info.Name + `</repository>
@@ -86,7 +135,7 @@ func createBranchSource(info *gits.GitRepositoryInfo, gitProvider gits.GitProvid
               <strategyId>1</strategyId>
             </org.jenkinsci.plugin.gitea.BranchDiscoveryTrait>
             <org.jenkinsci.plugin.gitea.OriginPullRequestDiscoveryTrait>
-              <strategyId>1</strategyId>
+              <strategyId>2</strategyId>
             </org.jenkinsci.plugin.gitea.OriginPullRequestDiscoveryTrait>
             <org.jenkinsci.plugin.gitea.ForkPullRequestDiscoveryTrait>
               <strategyId>1</strategyId>
@@ -98,10 +147,35 @@ func createBranchSource(info *gits.GitRepositoryInfo, gitProvider gits.GitProvid
 		  </traits>
 		</source>
 `
+	case gits.KindBitBucketCloud, gits.KindBitBucketServer:
+		return `
+	 	<source class="com.cloudbees.jenkins.plugins.bitbucket.BitbucketSCMSource" plugin="cloudbees-bitbucket-branch-source@2.2.10">
+	 	  ` + idXml + credXml + `
+          <serverUrl>` + info.HostURLWithoutUser() + `</serverUrl>
+          <repoOwner>` + info.Organisation + `</repoOwner>
+		  <repository>` + info.Name + `</repository>
+	 	  <traits>
+	 	    <com.cloudbees.jenkins.plugins.bitbucket.BranchDiscoveryTrait>
+	 	      <strategyId>1</strategyId>
+	 	    </com.cloudbees.jenkins.plugins.bitbucket.BranchDiscoveryTrait>
+	 	    <com.cloudbees.jenkins.plugins.bitbucket.OriginPullRequestDiscoveryTrait>
+	 	      <strategyId>2</strategyId>
+	 	    </com.cloudbees.jenkins.plugins.bitbucket.OriginPullRequestDiscoveryTrait>
+	 	    <com.cloudbees.jenkins.plugins.bitbucket.ForkPullRequestDiscoveryTrait>
+	 	      <strategyId>1</strategyId>
+	 	      <trust class="com.cloudbees.jenkins.plugins.bitbucket.ForkPullRequestDiscoveryTrait$TrustTeamForks"/>
+	 	    </com.cloudbees.jenkins.plugins.bitbucket.ForkPullRequestDiscoveryTrait>
+			<jenkins.scm.impl.trait.RegexSCMHeadFilterTrait plugin="scm-api@2.2.6">
+			  <regex>` + branches + `</regex>
+			</jenkins.scm.impl.trait.RegexSCMHeadFilterTrait>
+	 	  </traits>
+	 	</source>
+`
 	}
+
 	return `
 <source class="jenkins.plugins.git.GitSCMSource" plugin="git@3.7.0">
-  <id>3ee777bd-6590-4b97-ac65-1ab01e7062ad</id>
+  ` + idXml + `
   <remote>` + info.URL + `</remote>
 ` + credXml + `
 <traits>
@@ -114,7 +188,15 @@ func createBranchSource(info *gits.GitRepositoryInfo, gitProvider gits.GitProvid
 `
 }
 
-func CreateMultiBranchProjectXml(info *gits.GitRepositoryInfo, gitProvider gits.GitProvider, credentials string, branches string, jenkinsfile string) string {
+func CreateMultiBranchProjectXml(info *gits.GitRepository, gitProvider gits.GitProvider, credentials string, branches string, jenkinsfile string) string {
+	triggerXml := `
+	  <triggers>
+	    <com.cloudbees.hudson.plugins.folder.computed.PeriodicFolderTrigger plugin="cloudbees-folder@6.3">
+	      <spec>H/12 * * * *</spec>
+	      <interval>300000</interval>
+	    </com.cloudbees.hudson.plugins.folder.computed.PeriodicFolderTrigger>
+	  </triggers>
+`
 	return `<?xml version='1.0' encoding='UTF-8'?>
 <org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject plugin="workflow-multibranch@2.16">
   <actions/>
@@ -141,7 +223,7 @@ func CreateMultiBranchProjectXml(info *gits.GitRepositoryInfo, gitProvider gits.
 	<daysToKeep>-1</daysToKeep>
 	<numToKeep>-1</numToKeep>
   </orphanedItemStrategy>
-  <triggers/>
+` + triggerXml + `
   <disabled>false</disabled>
   <sources class="jenkins.branch.MultiBranchProject$BranchSourceList" plugin="branch-api@2.0.15">
 	<data>

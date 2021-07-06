@@ -1,11 +1,15 @@
 package jenkins
 
 const (
+	// DefaultJenkinsCredentialsPrefix prefix for jenkins credentials
 	DefaultJenkinsCredentialsPrefix = "jenkins-x-"
 
-	DefaultJenkinsfile = "Jenkinsfile"
-
+	// Chartmuseum name for chartmuseum
 	Chartmuseum = "chartmuseum"
 
-	DefaultBranchPattern = "master|PR-.*|feature.*"
+	// BranchPatternMasterPRsAndFeatures only match master, PRs and features
+	BranchPatternMasterPRsAndFeatures = "master|PR-.*|feature.*"
+
+	// BranchPatternMatchEverything matches everything
+	BranchPatternMatchEverything = ".*"
 )

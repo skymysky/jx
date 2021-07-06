@@ -2,9 +2,12 @@ package gits
 
 import (
 	"bytes"
-	"github.com/jenkins-x/jx/pkg/apis/jenkins.io/v1"
-	"github.com/jenkins-x/jx/pkg/util"
+	"fmt"
+	"strconv"
 	"strings"
+
+	v1 "github.com/jenkins-x/jx-api/pkg/apis/jenkins.io/v1"
+	"github.com/jenkins-x/jx/v2/pkg/util"
 )
 
 type CommitInfo struct {
@@ -25,7 +28,7 @@ var (
 	// ConventionalCommitTitles textual descriptions for
 	// Conventional Commit types: https://conventionalcommits.org/
 	ConventionalCommitTitles = map[string]*CommitGroup{
-		"feat":     createCommitGroup("Features"),
+		"feat":     createCommitGroup("New Features"),
 		"fix":      createCommitGroup("Bug Fixes"),
 		"perf":     createCommitGroup("Performance Improvements"),
 		"refactor": createCommitGroup("Code Refactoring"),
@@ -37,7 +40,7 @@ var (
 		"":         createCommitGroup(""),
 	}
 
-	unknownKindOrder = groupCounter + 1
+	unknownKindOrder = len(ConventionalCommitTitles) + 1
 )
 
 func createCommitGroup(title string) *CommitGroup {
@@ -67,16 +70,17 @@ func ParseCommit(message string) *CommitInfo {
 
 	idx := strings.Index(message, ":")
 	if idx > 0 {
-		answer.Kind = message[0:idx]
-
-		rest := strings.TrimSpace(message[idx+1:])
-		if strings.HasPrefix(rest, "(") {
-			idx = strings.Index(rest, ")")
+		kind := message[0:idx]
+		if strings.HasSuffix(kind, ")") {
+			idx := strings.Index(kind, "(")
 			if idx > 0 {
-				answer.Feature = strings.TrimSpace(rest[1:idx])
-				rest = strings.TrimSpace(rest[idx+1:])
+				answer.Feature = strings.TrimSpace(kind[idx+1 : len(kind)-1])
+				kind = strings.TrimSpace(kind[0:idx])
 			}
 		}
+		answer.Kind = kind
+		rest := strings.TrimSpace(message[idx+1:])
+
 		answer.Message = rest
 	}
 	return answer
@@ -103,17 +107,25 @@ type GroupAndCommitInfos struct {
 }
 
 // GenerateMarkdown generates the markdown document for the commits
-func GenerateMarkdown(releaseSpec *v1.ReleaseSpec, gitInfo *GitRepositoryInfo) (string, error) {
+func GenerateMarkdown(releaseSpec *v1.ReleaseSpec, gitInfo *GitRepository) (string, error) {
 	commitInfos := []*CommitInfo{}
 
 	groupAndCommits := map[int]*GroupAndCommitInfos{}
 
+	issues := releaseSpec.Issues
+	issueMap := map[string]*v1.IssueSummary{}
+	for _, issue := range issues {
+		copy := issue
+		issueMap[copy.ID] = &copy
+	}
+
 	for _, cs := range releaseSpec.Commits {
-		message := cs.Message
+		commits := cs
+		message := commits.Message
 		if message != "" {
 			ci := ParseCommit(message)
 
-			description := "* " + describeCommit(gitInfo, &cs, ci) + "\n"
+			description := "* " + describeCommit(gitInfo, &commits, ci, issueMap) + "\n"
 			group := ci.Group()
 			if group != nil {
 				gac := groupAndCommits[group.Order]
@@ -130,7 +142,6 @@ func GenerateMarkdown(releaseSpec *v1.ReleaseSpec, gitInfo *GitRepositoryInfo) (
 		}
 	}
 
-	issues := releaseSpec.Issues
 	prs := releaseSpec.PullRequests
 
 	var buffer bytes.Buffer
@@ -139,21 +150,6 @@ func GenerateMarkdown(releaseSpec *v1.ReleaseSpec, gitInfo *GitRepositoryInfo) (
 	}
 
 	buffer.WriteString("## Changes\n")
-
-	if len(issues) > 0 {
-		buffer.WriteString("\n### Issues\n\n")
-
-		for _, issue := range issues {
-			buffer.WriteString("* " + describeIssue(gitInfo, &issue) + "\n")
-		}
-	}
-	if len(prs) > 0 {
-		buffer.WriteString("\n### Pull Requests\n\n")
-
-		for _, pr := range prs {
-			buffer.WriteString("* " + describeIssue(gitInfo, &pr) + "\n")
-		}
-	}
 
 	hasTitle := false
 	for i := 0; i <= unknownKindOrder; i++ {
@@ -172,19 +168,85 @@ func GenerateMarkdown(releaseSpec *v1.ReleaseSpec, gitInfo *GitRepositoryInfo) (
 					buffer.WriteString("### " + group.Title + "\n\n" + legend)
 				}
 			}
+			previous := ""
 			for _, msg := range gac.commits {
-				buffer.WriteString(msg)
+				if msg != previous {
+					buffer.WriteString(msg)
+					previous = msg
+				}
 			}
+		}
+	}
+
+	if len(issues) > 0 {
+		buffer.WriteString("\n### Issues\n\n")
+
+		previous := ""
+		for _, issue := range issues {
+			i := issue
+			msg := describeIssue(gitInfo, &i)
+			if msg != previous {
+				buffer.WriteString("* " + msg + "\n")
+				previous = msg
+			}
+		}
+	}
+	if len(prs) > 0 {
+		buffer.WriteString("\n### Pull Requests\n\n")
+
+		previous := ""
+		for _, pr := range prs {
+			pullRequest := pr
+			msg := describeIssue(gitInfo, &pullRequest)
+			if msg != previous {
+				buffer.WriteString("* " + msg + "\n")
+				previous = msg
+			}
+		}
+	}
+
+	if len(releaseSpec.DependencyUpdates) > 0 {
+		buffer.WriteString("\n### Dependency Updates\n\n")
+		var previous v1.DependencyUpdate
+		sequence := make([]v1.DependencyUpdate, 0)
+		buffer.WriteString("| Dependency | Component | New Version | Old Version |\n")
+		buffer.WriteString("| ---------- | --------- | ----------- | ----------- |\n")
+		for i, du := range releaseSpec.DependencyUpdates {
+			sequence = append(sequence, du)
+			// If it's the last element, or if the owner/repo:component changes, then print - this logic relies of the sort
+			// being owner, repo, component, fromVersion, ToVersion, which is done above
+			if i == len(releaseSpec.DependencyUpdates)-1 || du.Owner != previous.Owner || du.Repo != previous.Repo || du.Component != previous.Component {
+				// find the earliest from version
+				fromDu := sequence[0]
+				toDu := sequence[len(sequence)-1]
+				msg := fmt.Sprintf("| [%s/%s](%s) | %s | [%s](%s) | [%s](%s)|\n", toDu.Owner, toDu.Repo, toDu.URL, toDu.Component, toDu.ToVersion, toDu.ToReleaseHTMLURL, fromDu.FromVersion, fromDu.FromReleaseHTMLURL)
+				buffer.WriteString(msg)
+				sequence = make([]v1.DependencyUpdate, 0)
+			}
+			previous = du
 		}
 	}
 	return buffer.String(), nil
 }
 
-func describeIssue(info *GitRepositoryInfo, issue *v1.IssueSummary) string {
-	return "[#" + issue.ID + "](" + issue.URL + ") " + issue.Title + describeUser(info, issue.User)
+func describeIssue(info *GitRepository, issue *v1.IssueSummary) string {
+	return describeIssueShort(info, issue) + issue.Title + describeUser(info, issue.User)
 }
 
-func describeUser(info *GitRepositoryInfo, user *v1.UserDetails) string {
+func describeIssueShort(info *GitRepository, issue *v1.IssueSummary) string {
+	prefix := ""
+	id := issue.ID
+	if len(id) > 0 {
+		// lets only add the hash prefix for numeric ids
+		_, err := strconv.Atoi(id)
+		if err == nil {
+			prefix = "#"
+		}
+	}
+	return "[" + prefix + issue.ID + "](" + issue.URL + ") "
+}
+
+func describeUser(info *GitRepository, user *v1.UserDetails) string {
 	answer := ""
 	if user != nil {
 		userText := ""
@@ -211,7 +273,7 @@ func describeUser(info *GitRepositoryInfo, user *v1.UserDetails) string {
 	return answer
 }
 
-func describeCommit(info *GitRepositoryInfo, cs *v1.CommitSummary, ci *CommitInfo) string {
+func describeCommit(info *GitRepository, cs *v1.CommitSummary, ci *CommitInfo, issueMap map[string]*v1.IssueSummary) string {
 	prefix := ""
 	if ci.Feature != "" {
 		prefix = ci.Feature + ": "
@@ -224,5 +286,12 @@ func describeCommit(info *GitRepositoryInfo, cs *v1.CommitSummary, ci *CommitInf
 	if user == nil {
 		user = cs.Committer
 	}
-	return prefix + lines[0] + describeUser(info, user)
+	issueText := ""
+	for _, issueId := range cs.IssueIDs {
+		issue := issueMap[issueId]
+		if issue != nil {
+			issueText += " " + describeIssueShort(info, issue)
+		}
+	}
+	return prefix + lines[0] + describeUser(info, user) + issueText
 }

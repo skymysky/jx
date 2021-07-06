@@ -1,17 +1,13 @@
 package maven
 
 import (
-	"bytes"
-	"encoding/xml"
-	"io/ioutil"
-	"net/http"
-	"path/filepath"
 	"strings"
 
 	"fmt"
-	"github.com/jenkins-x/jx/pkg/util"
-	"gopkg.in/AlecAivazis/survey.v1"
 	"sort"
+
+	"github.com/jenkins-x/jx/v2/pkg/util"
+	"gopkg.in/AlecAivazis/survey.v1"
 )
 
 const (
@@ -67,7 +63,7 @@ func NewArchetypeModel() ArchetypeModel {
 
 func (m *ArchetypeModel) GroupIDs(filter string) []string {
 	answer := []string{}
-	for group, _ := range m.Groups {
+	for group := range m.Groups {
 		if filter == "" || strings.Index(group, filter) >= 0 {
 			answer = append(answer, group)
 		}
@@ -80,7 +76,7 @@ func (m *ArchetypeModel) ArtifactIDs(groupId string, filter string) []string {
 	answer := []string{}
 	artifact := m.Groups[groupId]
 	if artifact != nil {
-		for a, _ := range artifact.Artifacts {
+		for a := range artifact.Artifacts {
 			if filter == "" || strings.Index(a, filter) >= 0 {
 				answer = append(answer, a)
 			}
@@ -146,72 +142,8 @@ func (m *ArchetypeModel) AddArtifact(a *ArtifactData) *ArtifactVersions {
 	return artifact
 }
 
-func LoadArchetypes(name string, archetypeCatalogURL string, cacheDir string) (*ArchetypeModel, error) {
-	loader := func() ([]byte, error) {
-		client := http.Client{}
-		req, err := http.NewRequest(http.MethodGet, archetypeCatalogURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Accept", "application/xml")
-
-		res, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		return ioutil.ReadAll(res.Body)
-	}
-
-	cacheFileName := ""
-	if cacheDir != "" {
-		cacheFileName = filepath.Join(cacheDir, "archetype-catalog-"+name+".xml")
-	}
-	body, err := util.LoadCacheData(cacheFileName, loader)
-	if err != nil {
-		return nil, err
-	}
-
-	model := NewArchetypeModel()
-	decoder := xml.NewDecoder(bytes.NewReader(body))
-	artifact := ArtifactData{}
-	elementName := ""
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			break
-		}
-		switch t := token.(type) {
-		case xml.StartElement:
-			elmt := xml.StartElement(t)
-			elementName = elmt.Name.Local
-		case xml.EndElement:
-			elmt := xml.EndElement(t)
-			elementName = elmt.Name.Local
-			if elementName == "archetype" {
-				model.AddArtifact(&artifact)
-				artifact = ArtifactData{}
-			}
-		case xml.CharData:
-			bytes := xml.CharData(t)
-			text := strings.TrimSpace(string(bytes))
-			if text != "" {
-				switch elementName {
-				case "groupId":
-					artifact.GroupId += text
-				case "artifactId":
-					artifact.ArtifactId += text
-				case "version":
-					artifact.Version += text
-				case "description":
-					artifact.Description += text
-				}
-			}
-		}
-	}
-	return &model, nil
-}
-
-func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion bool, form *ArchetypeForm) error {
+func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion bool, form *ArchetypeForm, handles util.IOFileHandles) error {
+	surveyOpts := survey.WithStdio(handles.In, handles.Out, handles.Err)
 	groupIds := data.GroupIds
 	if len(data.GroupIds) == 0 {
 		filteredGroups := model.GroupIDs(data.GroupIdFilter)
@@ -224,7 +156,7 @@ func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion boo
 			Message: "Group ID:",
 			Options: filteredGroups,
 		}
-		err := survey.AskOne(prompt, &form.ArchetypeGroupId, survey.Required)
+		err := survey.AskOne(prompt, &form.ArchetypeGroupId, survey.Required, surveyOpts)
 		if err != nil {
 			return err
 		}
@@ -258,7 +190,7 @@ func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion boo
 			Message: "Artifact ID:",
 			Options: artifactIds,
 		}
-		err := survey.AskOne(prompt, &form.ArchetypeArtifactId, survey.Required)
+		err := survey.AskOne(prompt, &form.ArchetypeArtifactId, survey.Required, surveyOpts)
 		if err != nil {
 			return err
 		}
@@ -280,7 +212,7 @@ func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion boo
 			Message: "Version:",
 			Options: versions,
 		}
-		err := survey.AskOne(prompt, &form.ArchetypeVersion, survey.Required)
+		err := survey.AskOne(prompt, &form.ArchetypeVersion, survey.Required, surveyOpts)
 		if err != nil {
 			return err
 		}
@@ -294,7 +226,7 @@ func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion boo
 			Message: "Project Group ID:",
 			Default: "com.acme",
 		}
-		err := survey.AskOne(q, &form.GroupId, survey.Required)
+		err := survey.AskOne(q, &form.GroupId, survey.Required, surveyOpts)
 		if err != nil {
 			return err
 		}
@@ -304,7 +236,7 @@ func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion boo
 			Message: "Project Artifact ID:",
 			Default: "",
 		}
-		err := survey.AskOne(q, &form.ArtifactId, survey.Required)
+		err := survey.AskOne(q, &form.ArtifactId, survey.Required, surveyOpts)
 		if err != nil {
 			return err
 		}
@@ -314,7 +246,7 @@ func (model *ArchetypeModel) CreateSurvey(data *ArchetypeFilter, pickVersion boo
 			Message: "Project Version:",
 			Default: "1.0.0-SNAPSHOT",
 		}
-		err := survey.AskOne(q, &form.Version, survey.Required)
+		err := survey.AskOne(q, &form.Version, survey.Required, surveyOpts)
 		if err != nil {
 			return err
 		}

@@ -3,7 +3,8 @@ package kube
 import (
 	"time"
 
-	"github.com/jenkins-x/jx/pkg/apis/jenkins.io/v1"
+	v1 "github.com/jenkins-x/jx-api/pkg/apis/jenkins.io/v1"
+	"github.com/pkg/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -20,7 +21,10 @@ func StartPromote(p *v1.PromoteActivityStep) error {
 }
 
 func CompletePromote(p *v1.PromoteActivityStep) error {
-	StartPromote(p)
+	err := StartPromote(p)
+	if err != nil {
+		return err
+	}
 	if p.CompletedTimestamp == nil {
 		p.CompletedTimestamp = &metav1.Time{
 			Time: time.Now(),
@@ -31,7 +35,10 @@ func CompletePromote(p *v1.PromoteActivityStep) error {
 }
 
 func FailedPromote(p *v1.PromoteActivityStep) error {
-	StartPromote(p)
+	err := StartPromote(p)
+	if err != nil {
+		return err
+	}
 	if p.CompletedTimestamp == nil {
 		p.CompletedTimestamp = &metav1.Time{
 			Time: time.Now(),
@@ -42,30 +49,51 @@ func FailedPromote(p *v1.PromoteActivityStep) error {
 }
 
 func StartPromotionPullRequest(a *v1.PipelineActivity, s *v1.PipelineActivityStep, ps *v1.PromoteActivityStep, p *v1.PromotePullRequestStep) error {
-	StartPromote(ps)
+	err := StartPromote(ps)
+	if err != nil {
+		return err
+	}
 	if p.StartedTimestamp == nil {
 		p.StartedTimestamp = &metav1.Time{
 			Time: time.Now(),
 		}
 	}
-	if p.Status == v1.ActivityStatusTypeNone {
+	if a.Spec.WorkflowStatus != v1.ActivityStatusTypeRunning {
+		a.Spec.WorkflowStatus = v1.ActivityStatusTypeRunning
+	}
+	if a.Spec.Status != v1.ActivityStatusTypeRunning {
+		a.Spec.Status = v1.ActivityStatusTypeRunning
+	}
+	if p.Status != v1.ActivityStatusTypeRunning {
 		p.Status = v1.ActivityStatusTypeRunning
 	}
 	return nil
 }
 
 func StartPromotionUpdate(a *v1.PipelineActivity, s *v1.PipelineActivityStep, ps *v1.PromoteActivityStep, p *v1.PromoteUpdateStep) error {
-	StartPromote(ps)
+	err := StartPromote(ps)
+	if err != nil {
+		return err
+	}
 	pullRequest := ps.PullRequest
 	if pullRequest != nil {
-		CompletePromotionPullRequest(a, s, ps, pullRequest)
+		err = CompletePromotionPullRequest(a, s, ps, pullRequest)
+		if err != nil {
+			return errors.Wrap(err, "unable to complete promotion pull request")
+		}
 	}
 	if p.StartedTimestamp == nil {
 		p.StartedTimestamp = &metav1.Time{
 			Time: time.Now(),
 		}
 	}
-	if p.Status == v1.ActivityStatusTypeNone {
+	if a.Spec.WorkflowStatus != v1.ActivityStatusTypeRunning {
+		a.Spec.WorkflowStatus = v1.ActivityStatusTypeRunning
+	}
+	if a.Spec.Status != v1.ActivityStatusTypeRunning {
+		a.Spec.Status = v1.ActivityStatusTypeRunning
+	}
+	if p.Status != v1.ActivityStatusTypeRunning {
 		p.Status = v1.ActivityStatusTypeRunning
 	}
 	return nil
@@ -102,10 +130,16 @@ func FailedPromotionPullRequest(a *v1.PipelineActivity, s *v1.PipelineActivitySt
 }
 
 func CompletePromotionUpdate(a *v1.PipelineActivity, s *v1.PipelineActivityStep, ps *v1.PromoteActivityStep, p *v1.PromoteUpdateStep) error {
-	CompletePromote(ps)
+	err := CompletePromote(ps)
+	if err != nil {
+		return err
+	}
 	pullRequest := ps.PullRequest
 	if pullRequest != nil {
-		CompletePromotionPullRequest(a, s, ps, pullRequest)
+		err = CompletePromotionPullRequest(a, s, ps, pullRequest)
+		if err != nil {
+			return err
+		}
 	}
 	if p.StartedTimestamp == nil {
 		p.StartedTimestamp = &metav1.Time{
@@ -122,10 +156,16 @@ func CompletePromotionUpdate(a *v1.PipelineActivity, s *v1.PipelineActivityStep,
 }
 
 func FailedPromotionUpdate(a *v1.PipelineActivity, s *v1.PipelineActivityStep, ps *v1.PromoteActivityStep, p *v1.PromoteUpdateStep) error {
-	FailedPromote(ps)
+	err := FailedPromote(ps)
+	if err != nil {
+		return err
+	}
 	pullRequest := ps.PullRequest
 	if pullRequest != nil {
-		CompletePromotionPullRequest(a, s, ps, pullRequest)
+		err = CompletePromotionPullRequest(a, s, ps, pullRequest)
+		if err != nil {
+			return err
+		}
 	}
 	if p.StartedTimestamp == nil {
 		p.StartedTimestamp = &metav1.Time{

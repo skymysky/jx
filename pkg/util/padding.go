@@ -3,6 +3,7 @@ package util
 import (
 	"math"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -23,27 +24,27 @@ func Pad(s, pad string, width int, align int) string {
 }
 
 func PadRight(s, pad string, width int) string {
-	gap := width - len(s)
+	gap := width - utf8.RuneCountInString(s)
 	if gap > 0 {
-		return s + strings.Repeat(string(pad), gap)
+		return s + strings.Repeat(pad, gap)
 	}
 	return s
 }
 
 func PadLeft(s, pad string, width int) string {
-	gap := width - len(s)
+	gap := width - utf8.RuneCountInString(s)
 	if gap > 0 {
-		return strings.Repeat(string(pad), gap) + s
+		return strings.Repeat(pad, gap) + s
 	}
 	return s
 }
 
 func PadCenter(s, pad string, width int) string {
-	gap := width - len(s)
+	gap := width - utf8.RuneCountInString(s)
 	if gap > 0 {
 		gapLeft := int(math.Ceil(float64(gap / 2)))
 		gapRight := gap - gapLeft
-		return strings.Repeat(string(pad), gapLeft) + s + strings.Repeat(string(pad), gapRight)
+		return strings.Repeat(pad, gapLeft) + s + strings.Repeat(pad, gapRight)
 	}
 	return s
 }

@@ -1,162 +1,226 @@
-#
-# Copyright (C) Original Authors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#         http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
+# Make does not offer a recursive wildcard function, so here's one:
+rwildcard=$(wildcard $1$2) $(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2))
 
 SHELL := /bin/bash
 NAME := jx
-GO := GO15VENDOREXPERIMENT=1 go
-VERSION := $(shell cat pkg/version/VERSION)
-#ROOT_PACKAGE := $(shell $(GO) list .)
-ROOT_PACKAGE := github.com/jenkins-x/jx
+BUILD_TARGET = build
+MAIN_SRC_FILE=cmd/jx/jx.go
+GO := GO111MODULE=on go
+GO_NOMOD :=GO111MODULE=off go
+REV := $(shell git rev-parse --short HEAD 2> /dev/null || echo 'unknown')
+ORG := jenkins-x
+ORG_REPO := $(ORG)/$(NAME)
+RELEASE_ORG_REPO := $(ORG_REPO)
+ROOT_PACKAGE := github.com/$(ORG_REPO)/v2
 GO_VERSION := $(shell $(GO) version | sed -e 's/^[^0-9.]*\([0-9.]*\).*/\1/')
-#PACKAGE_DIRS := pkg cmd
-PACKAGE_DIRS := $(shell $(GO) list ./... | grep -v /vendor/)
-PKGS := $(shell go list ./... | grep -v /vendor | grep -v generated)
+GO_DEPENDENCIES := $(call rwildcard,pkg/,*.go) $(call rwildcard,cmd/jx/,*.go)
 
+BUILD_DATE     := $(shell date +%Y-%m-%dT%H:%M:%SZ)
+GIT_TREE_STATE := $(shell test -z "`git status --porcelain`" && echo "clean" || echo "dirty")
 
-GO_DEPENDENCIES := cmd/*/*.go cmd/*/*/*.go pkg/*/*.go pkg/*/*/*.go pkg/*//*/*/*.go
-
-REV        := $(shell git rev-parse --short HEAD 2> /dev/null  || echo 'unknown')
-BRANCH     := $(shell git rev-parse --abbrev-ref HEAD 2> /dev/null  || echo 'unknown')
-BUILD_DATE := $(shell date +%Y%m%d-%H:%M:%S)
-BUILDFLAGS := -ldflags \
-  " -X $(ROOT_PACKAGE)/pkg/version.Version=$(VERSION)\
-		-X $(ROOT_PACKAGE)/pkg/version.Revision='$(REV)'\
-		-X $(ROOT_PACKAGE)/pkg/version.Branch='$(BRANCH)'\
-		-X $(ROOT_PACKAGE)/pkg/version.BuildDate='$(BUILD_DATE)'\
-		-X $(ROOT_PACKAGE)/pkg/version.GoVersion='$(GO_VERSION)'"
 CGO_ENABLED = 0
 
-VENDOR_DIR=vendor
+REPORTS_DIR=$(BUILD_TARGET)/reports
 
-all: build
+GOTEST := $(GO) test
+# If available, use gotestsum which provides more comprehensive output
+# This is used in the CI builds
+ifneq (, $(shell which gotestsum 2> /dev/null))
+GOTESTSUM_FORMAT ?= standard-quiet
+GOTEST := GO111MODULE=on gotestsum --junitfile $(REPORTS_DIR)/integration.junit.xml --format $(GOTESTSUM_FORMAT) --
+endif
 
-check: fmt build test
+# set dev version unless VERSION is explicitly set via environment
+VERSION ?= $(shell echo "$$(git for-each-ref refs/tags/ --count=1 --sort=-version:refname --format='%(refname:short)' 2>/dev/null)-dev+$(REV)" | sed 's/^v//')
 
-build: $(GO_DEPENDENCIES)
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(BUILDFLAGS) -o build/$(NAME) cmd/jx/jx.go
+# Build flags for setting build-specific configuration at build time - defaults to empty
+BUILD_TIME_CONFIG_FLAGS ?= ""
 
-test: 
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) test $(PACKAGE_DIRS) -test.v
+# Full build flags used when building binaries. Not used for test compilation/execution.
+BUILDFLAGS :=  -ldflags \
+  " -X $(ROOT_PACKAGE)/pkg/version.Version=$(VERSION)\
+		-X $(ROOT_PACKAGE)/pkg/version.Revision=$(REV)\
+		-X $(ROOT_PACKAGE)/pkg/version.BuildDate=$(BUILD_DATE)\
+		-X $(ROOT_PACKAGE)/pkg/version.GoVersion=$(GO_VERSION)\
+		-X $(ROOT_PACKAGE)/pkg/version.GitTreeState=$(GIT_TREE_STATE)\
+		$(BUILD_TIME_CONFIG_FLAGS)"
 
-#	CGO_ENABLED=$(CGO_ENABLED) $(GO) test github.com/jenkins-x/jx/cmds
+# Some tests expect default values for version.*, so just use the config package values there.
+TEST_BUILDFLAGS :=  -ldflags "$(BUILD_TIME_CONFIG_FLAGS)"
 
-full: $(PKGS)
+ifdef DEBUG
+BUILDFLAGS := -gcflags "all=-N -l" $(BUILDFLAGS)
+endif
 
-install: $(GO_DEPENDENCIES)
-	GOBIN=${GOPATH}/bin $(GO) install $(BUILDFLAGS) cmd/jx/jx.go
+ifdef PARALLEL_BUILDS
+BUILDFLAGS += -p $(PARALLEL_BUILDS)
+GOTEST += -p $(PARALLEL_BUILDS)
+else
+# -p 4 seems to work well for people
+GOTEST += -p 4
+endif
 
-fmt:
-	@FORMATTED=`$(GO) fmt $(PACKAGE_DIRS)`
-	@([[ ! -z "$(FORMATTED)" ]] && printf "Fixed unformatted files:\n$(FORMATTED)") || true
+ifdef DISABLE_TEST_CACHING
+GOTEST += -count=1
+endif
 
-arm:
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=arm $(GO) build $(BUILDFLAGS) -o build/$(NAME)-arm cmd/jx/jx.go
+TEST_PACKAGE ?= ./...
+COVER_OUT:=$(REPORTS_DIR)/cover.out
+COVERFLAGS=-coverprofile=$(COVER_OUT) --covermode=count --coverpkg=./...
 
-win:
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=windows GOARCH=amd64 $(GO) build $(BUILDFLAGS) -o build/$(NAME).exe cmd/jx/jx.go
+.PHONY: list
+list: ## List all make targets
+	@$(MAKE) -pRrn : -f $(MAKEFILE_LIST) 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | egrep -v -e '^[^[:alnum:]]' -e '^$@$$' | sort
 
-bootstrap: vendoring
+.PHONY: help
+.DEFAULT_GOAL := help
+help:
+	@grep -h -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
-vendoring:
-	$(GO) get -u github.com/Masterminds/glide
-	GO15VENDOREXPERIMENT=1 glide update --strip-vendor
+all: build ## Build the binary
+full: check ## Build and run the tests
+check: build test ## Build and run the tests
+get-test-deps: ## Install test dependencies
+	$(GO_NOMOD) get github.com/axw/gocov/gocov
+	$(GO_NOMOD) get -u gopkg.in/matm/v1/gocov-html
 
-release: check
-	rm -rf build release && mkdir build release
-	for os in linux darwin ; do \
-		CGO_ENABLED=$(CGO_ENABLED) GOOS=$$os GOARCH=amd64 $(GO) build $(BUILDFLAGS) -o build/$$os/$(NAME) cmd/jx/jx.go ; \
-	done
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=windows GOARCH=amd64 $(GO) build $(BUILDFLAGS) -o build/$(NAME)-windows-amd64.exe cmd/jx/jx.go
-	zip --junk-paths release/$(NAME)-windows-amd64.zip build/$(NAME)-windows-amd64.exe README.md LICENSE
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=arm $(GO) build $(BUILDFLAGS) -o build/arm/$(NAME) cmd/jx/jx.go
-	chmod +x build/darwin/$(NAME)
+print-version: ## Print version
+	@echo $(VERSION)
+
+build: $(GO_DEPENDENCIES) ## Build jx binary for current OS
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) $(BUILD_TARGET) $(BUILDFLAGS) -o build/$(NAME) $(MAIN_SRC_FILE)
+
+build-all: $(GO_DEPENDENCIES) build make-reports-dir ## Build all files - runtime, all tests etc.
+	CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -run=nope -tags=integration,unit -failfast -short ./... $(BUILDFLAGS)
+
+tidy-deps: ## Cleans up dependencies
+	$(GO) mod tidy
+	# mod tidy only takes compile dependencies into account, let's make sure we capture tooling dependencies as well
+	@$(MAKE) install-generate-deps
+
+.PHONY: make-reports-dir
+make-reports-dir:
+	mkdir -p $(REPORTS_DIR)
+
+test: ## Run tests with the "unit" build tag
+	KUBECONFIG=/cluster/connections/not/allowed CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) --tags=unit -failfast -short ./... $(TEST_BUILDFLAGS)
+
+test-coverage : make-reports-dir ## Run tests and coverage for all tests with the "unit" build tag
+	CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) --tags=unit $(COVERFLAGS) -failfast -short ./... $(TEST_BUILDFLAGS)
+
+test-report: make-reports-dir get-test-deps test-coverage ## Create the test report
+	@gocov convert $(COVER_OUT) | gocov report
+
+test-report-html: make-reports-dir get-test-deps test-coverage ## Create the test report in HTML format
+	@gocov convert $(COVER_OUT) | gocov-html > $(REPORTS_DIR)/cover.html && open $(REPORTS_DIR)/cover.html
+
+test-verbose: make-reports-dir ## Run the unit tests in verbose mode
+	CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -v $(COVERFLAGS) --tags=unit -failfast ./... $(TEST_BUILDFLAGS)
+
+test-integration: get-test-deps ## Run the integration tests
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -tags=integration  -short ./... $(TEST_BUILDFLAGS)
+
+test-integration1: make-reports-dir
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -tags=integration $(COVERFLAGS) -short ./... $(TEST_BUILDFLAGS) -test.v -run $(TEST)
+
+test-integration1-pkg: make-reports-dir
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -tags=integration $(COVERFLAGS) -short $(PKG) -test.v -run $(TEST)
+
+test-rich-integration1: make-reports-dir
+	@CGO_ENABLED=$(CGO_ENABLED) richgo test -tags=integration $(COVERFLAGS) -short -test.v $(TEST_PACKAGE) $(TEST_BUILDFLAGS) -run $(TEST)
+
+test-integration-report: make-reports-dir get-test-deps test-integration ## Create the integration tests report
+	@gocov convert $(COVER_OUT) | gocov report
+
+test-integration-report-html: make-reports-dir get-test-deps test-integration
+	@gocov convert $(COVER_OUT) | gocov-html > $(REPORTS_DIR)/cover.html && open $(REPORTS_DIR)/cover.html
+
+test-slow-integration: make-reports-dir ## Run the any tests without a build tag as well as those that have the "integration" build tag. This target is run during CI.
+	@CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -tags=integration $(COVERFLAGS) ./... $(TEST_BUILDFLAGS)
+
+test-slow-integration-report: make-reports-dir get-test-deps test-slow-integration
+	@gocov convert $(COVER_OUT) | gocov report
+
+test-slow-integration-report-html: make-reports-dir get-test-deps test-slow-integration
+	@gocov convert $(COVER_OUT) | gocov-html > $(REPORTS_DIR)/cover.html && open $(REPORTS_DIR)/cover.html
+
+test1: get-test-deps make-reports-dir ## Runs single test specified by test name and optional package, eg 'make test1 TEST_PACKAGE=./pkg/gits TEST=TestGitCLI'
+	CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) $(TEST_BUILDFLAGS) -tags="unit integration" $(TEST_PACKAGE) -run $(TEST)
+
+testbin: get-test-deps make-reports-dir
+	CGO_ENABLED=$(CGO_ENABLED) $(GOTEST) -c github.com/jenkins-x/jx/v2/pkg/cmd -o build/jx-test $(TEST_BUILDFLAGS)
+
+install: $(GO_DEPENDENCIES) ## Install the binary
+	GOBIN=${GOPATH}/bin $(GO) install $(BUILDFLAGS) $(MAIN_SRC_FILE)
+
+linux: ## Build for Linux
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=amd64 $(GO) $(BUILD_TARGET) $(BUILDFLAGS) -o build/linux/$(NAME) $(MAIN_SRC_FILE)
 	chmod +x build/linux/$(NAME)
+
+arm: ## Build for ARM
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=arm $(GO) $(BUILD_TARGET) $(BUILDFLAGS) -o build/arm/$(NAME) $(MAIN_SRC_FILE)
 	chmod +x build/arm/$(NAME)
 
-	cd ./build/darwin; tar -zcvf ../../release/jx-darwin-amd64.tar.gz jx
-	cd ./build/linux; tar -zcvf ../../release/jx-linux-amd64.tar.gz jx
-	cd ./build/arm; tar -zcvf ../../release/jx-linux-arm.tar.gz jx
+win: ## Build for Windows
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=windows GOARCH=amd64 $(GO) $(BUILD_TARGET) $(BUILDFLAGS) -o build/win/$(NAME)-windows-amd64.exe $(MAIN_SRC_FILE)
 
-	go get -u github.com/progrium/gh-release
-	gh-release checksums sha256
-	gh-release create jenkins-x/$(NAME) $(VERSION) master $(VERSION)
+darwin: ## Build for OSX
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=darwin GOARCH=amd64 $(GO) $(BUILD_TARGET) $(BUILDFLAGS) -o build/darwin/$(NAME) $(MAIN_SRC_FILE)
+	chmod +x build/darwin/$(NAME)
 
-	jx step changelog  --header-file docs/dev/changelog-header.md --version $(VERSION)
+.PHONY: test-release
+test-release: clean build
+	git fetch --tags
+	REV=$(REV) BRANCH=$(BRANCH) BUILDDATE=$(BUILD_DATE) GOVERSION=$(GO_VERSION) ROOTPACKAGE=$(ROOT_PACKAGE) VERSION=$(VERSION) goreleaser --config=./.goreleaser.yml --snapshot --skip-publish --rm-dist --skip-validate --debug
 
-	updatebot push-version --kind brew jx $(VERSION)
-	updatebot push-version --kind docker JX_VERSION $(VERSION)
-	updatebot update-loop
+.PHONY: release
+release: clean build test-slow-integration linux # Release the binary
+	git fetch origin refs/tags/v$(VERSION)
+	# Don't create a changelog for the distro
+	@if [[ -z "${DISTRO}" ]]; then \
+		./build/linux/jx step changelog --verbose --header-file=docs/dev/changelog-header.md --version=$(VERSION) --rev=$(PULL_BASE_SHA) --output-markdown=changelog.md --update-release=false; \
+		GITHUB_TOKEN=$(GITHUB_ACCESS_TOKEN) REV=$(REV) BRANCH=$(BRANCH) BUILDDATE=$(BUILD_DATE) GOVERSION=$(GO_VERSION) ROOTPACKAGE=$(ROOT_PACKAGE) VERSION=$(VERSION) goreleaser release --config=.goreleaser.yml --rm-dist --release-notes=./changelog.md --skip-validate; \
+	else \
+		GITHUB_TOKEN=$(GITHUB_ACCESS_TOKEN) REV=$(REV) BRANCH=$(BRANCH) BUILDDATE=$(BUILD_DATE) GOVERSION=$(GO_VERSION) ROOTPACKAGE=$(ROOT_PACKAGE) VERSION=$(VERSION) goreleaser release --config=.goreleaser.yml --rm-dist; \
+	fi
 
-	echo "Updating the JX CLI reference docs"
-	git clone https://github.com/jenkins-x/jx-docs.git
-	cd jx-docs/content/commands; \
-		../../../build/linux/jx create docs; \
-		git config credential.helper store; \
-		git add *; \
-		git commit --allow-empty -a -m "updated jx commands from $(VERSION)"; \
-		git push origin
+.PHONY: release-distro
+release-distro:
+	@$(MAKE) DISTRO=true release
 
-clean:
-	rm -rf build release
+.PHONY: clean
+clean: ## Clean the generated artifacts
+	rm -rf build release dist
 
-linux:
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=amd64 $(GO) build $(BUILDFLAGS) -o build/$(NAME)-linux-amd64 cmd/jx/jx.go
+get-fmt-deps: ## Install test dependencies
+	$(GO_NOMOD) get golang.org/x/tools/cmd/goimports
 
-docker-go: linux Dockerfile.buildgo
-	docker build --no-cache -t builder-go -f Dockerfile.buildgo .
+.PHONY: fmt
+fmt: importfmt ## Format the code
+	$(eval FORMATTED = $(shell $(GO) fmt ./...))
+	@if [ "$(FORMATTED)" == "" ]; \
+      	then \
+      	    echo "All Go files properly formatted"; \
+      	else \
+      		echo "Fixed formatting for: $(FORMATTED)"; \
+      	fi
 
-docker-maven: linux Dockerfile.maven
-	docker build --no-cache -t builder-maven -f Dockerfile.maven .
-
-docker-pipeline: linux
-	docker build -t rawlingsj/builder-base:dev . -f Dockerfile-pipeline
-
-.PHONY: release clean arm
-
-preview: linux
-	docker build --no-cache -t docker.io/jenkinsxio/builder-maven:SNAPSHOT-JX-$(BRANCH_NAME)-$(BUILD_NUMBER) -f Dockerfile.maven .
-	docker push docker.io/jenkinsxio/builder-maven:SNAPSHOT-JX-$(BRANCH_NAME)-$(BUILD_NUMBER)
-	docker build --no-cache -t docker.io/jenkinsxio/builder-go:SNAPSHOT-JX-$(BRANCH_NAME)-$(BUILD_NUMBER) -f Dockerfile.buildgo .
-	docker push docker.io/jenkinsxio/builder-go:SNAPSHOT-JX-$(BRANCH_NAME)-$(BUILD_NUMBER)
-	docker build --no-cache -t docker.io/jenkinsxio/builder-nodejs:SNAPSHOT-JX-$(BRANCH_NAME)-$(BUILD_NUMBER) -f Dockerfile.nodejs .
-	docker push docker.io/jenkinsxio/builder-nodejs:SNAPSHOT-JX-$(BRANCH_NAME)-$(BUILD_NUMBER)
-
-FGT := $(GOPATH)/bin/fgt
-$(FGT):
-	go get github.com/GeertJohan/fgt
-
-GOLINT := $(GOPATH)/bin/golint
-$(GOLINT):
-	go get github.com/golang/lint/golint
-
-#	@echo "FORMATTING"
-#	@$(FGT) gofmt -l=true $(GOPATH)/src/$@/*.go
-
-$(PKGS): $(GOLINT) $(FGT)
-	@echo "LINTING"
-	@$(FGT) $(GOLINT) $(GOPATH)/src/$@/*.go
-	@echo "VETTING"
-	@go vet -v $@
-	@echo "TESTING"
-	@go test -v $@
+.PHONY: importfmt
+importfmt: get-fmt-deps
+	@echo "Formatting the imports..."
+	goimports -w $(GO_DEPENDENCIES)
 
 .PHONY: lint
-lint: vendor | $(PKGS) $(GOLINT) # ❷
-	@cd $(BASE) && ret=0 && for pkg in $(PKGS); do \
-	    test -z "$$($(GOLINT) $$pkg | tee /dev/stderr)" || ret=1 ; \
-	done ; exit $$ret
+lint: ## Lint the code
+	./hack/gofmt.sh
+	./hack/linter.sh
 
+.PHONY: code-generate
+code-generate:
+	./hack/generate.sh
 
+.PHONY: mod
+mod: build ## Would like to have tidy-deps here but that tends to cause problems
+
+include Makefile.docker
+include Makefile.codegen
